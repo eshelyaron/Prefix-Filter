@@ -5,10 +5,10 @@
 void write_fpp_to_file();
 
 
-int main() {
-    write_fpp_to_file();
-    return 0;
-}
+// int main() {
+//     write_fpp_to_file();
+//     return 0;
+// }
 
 void write_fpp_to_file() {
     using CF8 = cuckoofilter::CuckooFilter<uint64_t, 8>;

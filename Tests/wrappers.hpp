@@ -1,6 +1,4 @@
-/* Taken from
- * https://github.com/FastFilter/fastfilter_cpp
- * */
+/* Taken from https://github.com/FastFilter/fastfilter_cpp */
 
 //#pragma once
 #ifndef FILTERS_WRAPPERS_HPP
@@ -49,6 +47,13 @@ enum filter_id {
 
 template<typename Table>
 struct FilterAPI {
+};
+
+struct indexed_item_s {
+  u64 index;
+  u64 item;
+  u64 pdid;
+  u64 hash;
 };
 
 class TrivialFilter {
@@ -672,51 +677,136 @@ public:
         return FilterAPI<Table>::Add(data, &GenSpare);
     }
 
+  uint32_t item_bin_index(u64 &item) {
+    const u64 s = H0(item);
+    constexpr u64 full_mask = (1ULL << 55);
+    uint32_t out1 = s >> 32u, out2 = s;
+    return reduce32(out1, (uint32_t) number_of_pd);
+  }
+
+  int * MultiAdd(u64 len, u64 * items) {
+    constexpr u64 full_mask = (1ULL << 55);
+    uint32_t bin_index = 0;
+    u64 i = 0;
+    struct indexed_item_s * indexed_items = NULL;
+    int * successes   = NULL;
+    u64 * new_to_original = NULL;
+    u64 s = 0;
+    u64 item = 0;
+    uint32_t out1 = 0, out2 = 0;
+    uint32_t pd_index = 0;
+    bool err = false;
+
+
+    printf("len is %lu/%lu\n", len, number_of_pd);
+    indexed_items = (struct indexed_item_s *)malloc(sizeof(*indexed_items)*len);
+    memset(indexed_items, 0, sizeof(*indexed_items)*len);
+    if (indexed_items == NULL) {
+      err = true;
+      goto cleanup;
+    }
+
+    successes = (int *)malloc(sizeof(*successes)*len);
+    memset(successes, 0, sizeof(*successes)*len);
+    if (successes == NULL) {
+      err = true;
+      goto cleanup;
+    }
+
+    for (i = 0; i < len; i++) {
+      item = items[i];
+      s = H0(item);
+      out1 = s >> 32u;
+      out2 = s;
+      pd_index = reduce(out1, (uint32_t) number_of_pd);
+      indexed_items[i].index = i;
+      indexed_items[i].item  = items[i];
+      indexed_items[i].pdid  = pd_index;
+      indexed_items[i].hash  = out2;
+    }
+
+    std::sort(indexed_items,
+              indexed_items + len,
+              [this](struct indexed_item_s a, struct indexed_item_s b) {
+                return a.pdid < b.pdid;
+              });
+
+    for (i = 0; i < len; i++) {
+      printf("%lu %u\n", indexed_items[i].index, item_bin_index(indexed_items[i].item));
+      uint16_t qr = fixed_reduce(indexed_items[i].hash);
+      int64_t quot = qr >> 8;
+      uint8_t rem = qr;
+      uint32_t pdid = indexed_items[i].pdid;
+      if ((!min_pd::cmp_qr1(qr, &pd_array[pdid])) ? min_pd::find_core(quot, rem, &pd_array[pdid]) : incSpare_lookup(pdid, qr)) {
+        successes[indexed_items[i].index] = 0;
+      } else {
+        successes[indexed_items[i].index] = 1;
+        AddInternal(pdid, indexed_items[i].hash);
+      }
+    }
+    
+  cleanup:
+    if (err) {
+      if (indexed_items) {
+        free(indexed_items);
+      }
+      if (successes) {
+        free(successes);
+        successes = NULL;
+      }
+    }
+
+    return successes;
+  };
+
+  void AddInternal(uint32_t pd_index, uint32_t out2) {
+      constexpr u64 full_mask = (1ULL << 55);
+      auto pd = pd_array + pd_index;
+      const uint64_t header = reinterpret_cast<const u64 *>(pd)[0];
+      const bool not_full = !(header & full_mask);
+
+      const uint16_t qr = fixed_reduce(out2);
+      const int64_t quot = qr >> 8;
+      const uint8_t rem = qr;
+
+      if (not_full) {
+        cap[0]++;
+        assert(!min_pd::is_pd_full(pd));
+        size_t end = min_pd::select64(header >> 6, quot);
+        assert(min_pd::check::val_header(pd));
+        const size_t h_index = end + 6;
+        const u64 mask = _bzhi_u64(-1, h_index);
+        const u64 lo = header & mask;
+        const u64 hi = ((header & ~mask) << 1u);// & h_mask;
+        assert(!(lo & hi));
+        const u64 h7 = lo | hi;
+        memcpy(pd, &h7, 7);
+
+        assert(min_pd::check::val_header(pd));
+
+        const size_t body_index = end - quot;
+        min_pd::body_add_case0_avx(body_index, rem, pd);
+        // auto mp = (u8 *) pd + 7 + body_index;
+        // const size_t b2m = (32 - 7) - (body_index + 1);
+        // memmove(mp + 1, mp, b2m);
+        // mp[0] = rem;
+        assert(min_pd::find_core(quot, rem, pd));
+        return;
+      } else {
+        auto add_res = min_pd::new_pd_swap_short(quot, rem, pd);
+        assert(min_pd::check::val_last_quot_is_sorted(pd));
+        incSpare_add(pd_index, add_res);
+      }
+    }
+  
+
     void Add(const u64 &item) {
-        const u64 s = H0(item);
-        constexpr u64 full_mask = (1ULL << 55);
-        uint32_t out1 = s >> 32u, out2 = s;
+      const u64 s = H0(item);
+      constexpr u64 full_mask = (1ULL << 55);
+      uint32_t out1 = s >> 32u, out2 = s;
+      const uint32_t pd_index = reduce32(out1, (uint32_t) number_of_pd);
 
-        const uint32_t pd_index = reduce32(out1, (uint32_t) number_of_pd);
-
-        auto pd = pd_array + pd_index;
-        const uint64_t header = reinterpret_cast<const u64 *>(pd)[0];
-        const bool not_full = !(header & full_mask);
-
-        const uint16_t qr = fixed_reduce(out2);
-        const int64_t quot = qr >> 8;
-        const uint8_t rem = qr;
-
-        if (not_full) {
-            cap[0]++;
-            assert(!min_pd::is_pd_full(pd));
-            size_t end = min_pd::select64(header >> 6, quot);
-            assert(min_pd::check::val_header(pd));
-            const size_t h_index = end + 6;
-            const u64 mask = _bzhi_u64(-1, h_index);
-            const u64 lo = header & mask;
-            const u64 hi = ((header & ~mask) << 1u);// & h_mask;
-            assert(!(lo & hi));
-            const u64 h7 = lo | hi;
-            memcpy(pd, &h7, 7);
-
-            assert(min_pd::check::val_header(pd));
-
-            const size_t body_index = end - quot;
-            min_pd::body_add_case0_avx(body_index, rem, pd);
-            // auto mp = (u8 *) pd + 7 + body_index;
-            // const size_t b2m = (32 - 7) - (body_index + 1);
-            // memmove(mp + 1, mp, b2m);
-            // mp[0] = rem;
-            assert(min_pd::find_core(quot, rem, pd));
-            assert(Find(item));
-            return;
-        } else {
-            auto add_res = min_pd::new_pd_swap_short(quot, rem, pd);
-            assert(min_pd::check::val_last_quot_is_sorted(pd));
-            incSpare_add(pd_index, add_res);
-            assert(Find(item));
-        }
+      (void)AddInternal(pd_index, out2);
     }
 
     /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -726,234 +816,238 @@ public:
     /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     auto get_capacity() const -> size_t {
-        size_t res = 0;
-        for (size_t i = 0; i < number_of_pd; ++i) {
-            res += min_pd::get_capacity(&pd_array[i]);
-        }
-        assert(res == cap[0]);
-        return res;
+      size_t res = 0;
+      for (size_t i = 0; i < number_of_pd; ++i) {
+        res += min_pd::get_capacity(&pd_array[i]);
+      }
+      assert(res == cap[0]);
+      return res;
     }
 
     auto get_name() const -> std::string {
-        std::string s0 = "Prefix-Filter ";
-        std::string s1 = FilterAPI<Table>::get_name(&GenSpare);
-        return s0 + "[ " + s1 + " ]";
+      std::string s0 = "Prefix-Filter ";
+      std::string s1 = FilterAPI<Table>::get_name(&GenSpare);
+      return s0 + "[ " + s1 + " ]";
     }
 
     auto count_overflowing_PDs() -> size_t {
-        size_t count_overflowing_PD = 0;
-        for (int i = 0; i < number_of_pd; ++i) {
-            bool add_cond = min_pd::pd_full(&pd_array[i]);
-            count_overflowing_PD += add_cond;
-            bool is_full = min_pd::pd_full(&pd_array[i]);
-            //            bool is_full2 = pd_vec[i]->is_full();
-            //            assert(is_full == is_full2);
-            bool final = (!add_cond or is_full);
-            // assert(final);
-        }
-        return count_overflowing_PD;
+      size_t count_overflowing_PD = 0;
+      for (int i = 0; i < number_of_pd; ++i) {
+        bool add_cond = min_pd::pd_full(&pd_array[i]);
+        count_overflowing_PD += add_cond;
+        bool is_full = min_pd::pd_full(&pd_array[i]);
+        //            bool is_full2 = pd_vec[i]->is_full();
+        //            assert(is_full == is_full2);
+        bool final = (!add_cond or is_full);
+        // assert(final);
+      }
+      return count_overflowing_PD;
     }
 
     auto count_empty_PDs() -> size_t {
-        size_t count_empty_PD = 0;
-        for (int i = 0; i < number_of_pd; ++i) {
-            bool add_cond = (min_pd::get_capacity(&pd_array[i]) <= 0);
-            count_empty_PD += add_cond;
-        }
-        return count_empty_PD;
+      size_t count_empty_PD = 0;
+      for (int i = 0; i < number_of_pd; ++i) {
+        bool add_cond = (min_pd::get_capacity(&pd_array[i]) <= 0);
+        count_empty_PD += add_cond;
+      }
+      return count_empty_PD;
     }
 
     auto get_byte_size() const -> size_t {
-        size_t l1 = sizeof(__m256i) * number_of_pd;
-        //        size_t l2 = FilterAPI<Table>::get_byte_size(GenSpare);
-        size_t l2 = FilterAPI<Table>::get_byte_size(&GenSpare);
-        auto res = l1 + l2;
-        return res;
+      size_t l1 = sizeof(__m256i) * number_of_pd;
+      //        size_t l2 = FilterAPI<Table>::get_byte_size(GenSpare);
+      size_t l2 = FilterAPI<Table>::get_byte_size(&GenSpare);
+      auto res = l1 + l2;
+      return res;
     }
 
     auto get_cap() const -> size_t {
-        return cap[0] + cap[1];
+      return cap[0] + cap[1];
     }
-};
+  };
 
 
-template<typename filterTable>
-struct FilterAPI<Prefix_Filter<filterTable>> {
-    using Table = Prefix_Filter<filterTable>;
+      template<typename filterTable>
+        struct FilterAPI<Prefix_Filter<filterTable>> {
+        using Table = Prefix_Filter<filterTable>;
 
-    static Table ConstructFromAddCount(size_t add_count) {
-        constexpr float loads[2] = {.95, .95};
-        // std::cout << "Lower workload" << std::endl;
-        // std::cout << "Workload 1!" << std::endl;
-        return Table(add_count, loads);
-    }
+        static Table ConstructFromAddCount(size_t add_count) {
+          constexpr float loads[2] = {.95, .95};
+          // std::cout << "Lower workload" << std::endl;
+          // std::cout << "Workload 1!" << std::endl;
+          return Table(add_count, loads);
+        }
 
-    static void Add(u64 key, Table *table) {
-        table->Add(key);
-    }
-    static void Remove(u64 key, Table *table) {
-        throw std::runtime_error("Unsupported");
-    }
+        static void Add(u64 key, Table *table) {
+          table->Add(key);
+        }
+  
+        static int * MultiAdd(u64 len, u64 * keys, Table *table) {
+          return table->MultiAdd(len, keys);
+        }
+        static void Remove(u64 key, Table *table) {
+          throw std::runtime_error("Unsupported");
+        }
 
-    CONTAIN_ATTRIBUTES static bool Contain(u64 key, const Table *table) {
-        return table->Find(key);
-    }
+        CONTAIN_ATTRIBUTES static bool Contain(u64 key, const Table *table) {
+          return table->Find(key);
+        }
 
-    static std::string get_name(const Table *table) {
-        return table->get_name();
-    }
+        static std::string get_name(const Table *table) {
+          return table->get_name();
+        }
 
-    static auto get_functionality(const Table *table) -> uint32_t {
-        return 3;
-    }
+        static auto get_functionality(const Table *table) -> uint32_t {
+          return 3;
+        }
 
-    static auto get_ID(const Table *table) -> filter_id {
-        return prefix_id;
-    }
+        static auto get_ID(const Table *table) -> filter_id {
+          return prefix_id;
+        }
 
-    static size_t get_byte_size(const Table *table) {
-        return table->get_byte_size();
-    }
+        static size_t get_byte_size(const Table *table) {
+          return table->get_byte_size();
+        }
 
-    static size_t get_cap(const Table *table) {
-        return table->get_cap();
-    }
-};
-
-
-template<typename ItemType,
-         size_t bits_per_item,
-         bool branchless,
-         typename HashFamily>
-struct FilterAPI<bloomfilter::BloomFilter<ItemType, bits_per_item, branchless, HashFamily>> {
-    using Table = bloomfilter::BloomFilter<ItemType, bits_per_item, branchless, HashFamily>;
-
-    static Table ConstructFromAddCount(size_t add_count) {
-        return Table(add_count);
-    }
-
-    static void Add(uint64_t key, Table *table) {
-        table->Add(key);
-    }
-
-    static void Remove(uint64_t key, Table *table) {
-        throw std::runtime_error("Unsupported");
-    }
-
-    inline static bool Contain(uint64_t key, const Table *table) {
-        return table->Contain(key) == bloomfilter::Ok;
-    }
-
-    static std::string get_name(const Table *table) {
-        return table->get_name();
-    }
-
-    static auto get_info(const Table *table) -> std::stringstream {
-        assert(0);
-        std::stringstream ss;
-        return ss;
-    }
-
-    static auto get_functionality(const Table *table) -> uint32_t {
-        return 3;
-    }
-    static auto get_ID(const Table *table) -> filter_id {
-        return bloom_id;
-    }
-
-    static size_t get_byte_size(const Table *table) {
-        return table->SizeInBytes();
-    }
-
-    static size_t get_cap(const Table *table) {
-        return -1;
-        // return table->get_cap();
-    }
-};
-
-/* 
-// The statistics gathered for each table type:
-struct Statistics {
-    size_t add_count;
-    double nanos_per_add;
-    double nanos_per_remove;
-    // key: percent of queries that were expected to be positive
-    map<int, double> nanos_per_finds;
-    double false_positive_probabilty;
-    double bits_per_item;
-};
+        static size_t get_cap(const Table *table) {
+          return table->get_cap();
+        }
+      };
 
 
-// Output for the first row of the table of results. type_width is the maximum number of
-// characters of the description of any table type, and find_percent_count is the number
-// of different lookup statistics gathered for each table. This function assumes the
-// lookup expected positive probabiilties are evenly distributed, with the first being 0%
-// and the last 100%.
-inline string StatisticsTableHeader(int type_width, const std::vector<double> &found_probabilities) {
-    ostringstream os;
+      template<typename ItemType,
+               size_t bits_per_item,
+               bool branchless,
+               typename HashFamily>
+        struct FilterAPI<bloomfilter::BloomFilter<ItemType, bits_per_item, branchless, HashFamily>> {
+        using Table = bloomfilter::BloomFilter<ItemType, bits_per_item, branchless, HashFamily>;
 
-    os << string(type_width, ' ');
-    os << setw(8) << right << "";
-    os << setw(8) << right << "";
-    for (size_t i = 0; i < found_probabilities.size(); ++i) {
-        os << setw(8) << "find";
-    }
-    os << setw(8) << "1*add+";
-    os << setw(8) << "" << setw(11) << "" << setw(11)
-       << "optimal" << setw(8) << "wasted" << setw(8) << "million" << endl;
+        static Table ConstructFromAddCount(size_t add_count) {
+          return Table(add_count);
+        }
 
-    os << string(type_width, ' ');
-    os << setw(8) << right << "add";
-    os << setw(8) << right << "remove";
-    for (double prob : found_probabilities) {
-        os << setw(8 - 1) << static_cast<int>(prob * 100.0) << '%';
-    }
-    os << setw(8) << "3*find";
-    os << setw(9) << "ε%" << setw(11) << "bits/item" << setw(11)
-       << "bits/item" << setw(8) << "space%" << setw(8) << "keys";
-    return os.str();
-}
+        static void Add(uint64_t key, Table *table) {
+          table->Add(key);
+        }
 
-// Overloading the usual operator<< as used in "std::cout << foo", but for Statistics
-template<class CharT, class Traits>
-basic_ostream<CharT, Traits> &operator<<(
-        basic_ostream<CharT, Traits> &os, const Statistics &stats) {
-    os << fixed << setprecision(2) << setw(8) << right
-       << stats.nanos_per_add;
-    double add_and_find = 0;
-    os << fixed << setprecision(2) << setw(8) << right
-       << stats.nanos_per_remove;
-    for (const auto &fps : stats.nanos_per_finds) {
-        os << setw(8) << fps.second;
-        add_and_find += fps.second;
-    }
-    add_and_find = add_and_find * 3 / stats.nanos_per_finds.size();
-    add_and_find += stats.nanos_per_add;
-    os << setw(8) << add_and_find;
+        static void Remove(uint64_t key, Table *table) {
+          throw std::runtime_error("Unsupported");
+        }
 
-    // we get some nonsensical result for very small fpps
-    if (stats.false_positive_probabilty > 0.0000001) {
-        const auto minbits = log2(1 / stats.false_positive_probabilty);
-        os << setw(8) << setprecision(4) << stats.false_positive_probabilty * 100
-           << setw(11) << setprecision(2) << stats.bits_per_item << setw(11) << minbits
-           << setw(8) << setprecision(1) << 100 * (stats.bits_per_item / minbits - 1)
-           << " " << setw(7) << setprecision(3) << (stats.add_count / 1000000.);
-    } else {
-        os << setw(8) << setprecision(4) << stats.false_positive_probabilty * 100
-           << setw(11) << setprecision(2) << stats.bits_per_item << setw(11) << 64
-           << setw(8) << setprecision(1) << 0
-           << " " << setw(7) << setprecision(3) << (stats.add_count / 1000000.);
-    }
-    return os;
-}
+        inline static bool Contain(uint64_t key, const Table *table) {
+          return table->Contain(key) == bloomfilter::Ok;
+        }
 
-struct samples {
-    double found_probability;
-    std::vector<uint64_t> to_lookup_mixed;
-    size_t true_match;
-    size_t actual_sample_size;
-};
+        static std::string get_name(const Table *table) {
+          return table->get_name();
+        }
 
-typedef struct samples samples_t;
- */
+        static auto get_info(const Table *table) -> std::stringstream {
+          assert(0);
+          std::stringstream ss;
+          return ss;
+        }
+
+        static auto get_functionality(const Table *table) -> uint32_t {
+          return 3;
+        }
+        static auto get_ID(const Table *table) -> filter_id {
+          return bloom_id;
+        }
+
+        static size_t get_byte_size(const Table *table) {
+          return table->SizeInBytes();
+        }
+
+        static size_t get_cap(const Table *table) {
+          return -1;
+          // return table->get_cap();
+        }
+      };
+
+      /*
+      // The statistics gathered for each table type:
+      struct Statistics {
+      size_t add_count;
+      double nanos_per_add;
+      double nanos_per_remove;
+      // key: percent of queries that were expected to be positive
+      map<int, double> nanos_per_finds;
+      double false_positive_probabilty;
+      double bits_per_item;
+      };
+
+
+      // Output for the first row of the table of results. type_width is the maximum number of
+      // characters of the description of any table type, and find_percent_count is the number
+      // of different lookup statistics gathered for each table. This function assumes the
+      // lookup expected positive probabiilties are evenly distributed, with the first being 0%
+      // and the last 100%.
+      inline string StatisticsTableHeader(int type_width, const std::vector<double> &found_probabilities) {
+      ostringstream os;
+
+      os << string(type_width, ' ');
+      os << setw(8) << right << "";
+      os << setw(8) << right << "";
+      for (size_t i = 0; i < found_probabilities.size(); ++i) {
+      os << setw(8) << "find";
+      }
+      os << setw(8) << "1*add+";
+      os << setw(8) << "" << setw(11) << "" << setw(11)
+      << "optimal" << setw(8) << "wasted" << setw(8) << "million" << endl;
+
+      os << string(type_width, ' ');
+      os << setw(8) << right << "add";
+      os << setw(8) << right << "remove";
+      for (double prob : found_probabilities) {
+      os << setw(8 - 1) << static_cast<int>(prob * 100.0) << '%';
+      }
+      os << setw(8) << "3*find";
+      os << setw(9) << "ε%" << setw(11) << "bits/item" << setw(11)
+      << "bits/item" << setw(8) << "space%" << setw(8) << "keys";
+      return os.str();
+      }
+
+      // Overloading the usual operator<< as used in "std::cout << foo", but for Statistics
+      template<class CharT, class Traits>
+      basic_ostream<CharT, Traits> &operator<<(
+      basic_ostream<CharT, Traits> &os, const Statistics &stats) {
+      os << fixed << setprecision(2) << setw(8) << right
+      << stats.nanos_per_add;
+      double add_and_find = 0;
+      os << fixed << setprecision(2) << setw(8) << right
+      << stats.nanos_per_remove;
+      for (const auto &fps : stats.nanos_per_finds) {
+      os << setw(8) << fps.second;
+      add_and_find += fps.second;
+      }
+      add_and_find = add_and_find * 3 / stats.nanos_per_finds.size();
+      add_and_find += stats.nanos_per_add;
+      os << setw(8) << add_and_find;
+
+      // we get some nonsensical result for very small fpps
+      if (stats.false_positive_probabilty > 0.0000001) {
+      const auto minbits = log2(1 / stats.false_positive_probabilty);
+      os << setw(8) << setprecision(4) << stats.false_positive_probabilty * 100
+      << setw(11) << setprecision(2) << stats.bits_per_item << setw(11) << minbits
+      << setw(8) << setprecision(1) << 100 * (stats.bits_per_item / minbits - 1)
+      << " " << setw(7) << setprecision(3) << (stats.add_count / 1000000.);
+      } else {
+      os << setw(8) << setprecision(4) << stats.false_positive_probabilty * 100
+      << setw(11) << setprecision(2) << stats.bits_per_item << setw(11) << 64
+      << setw(8) << setprecision(1) << 0
+      << " " << setw(7) << setprecision(3) << (stats.add_count / 1000000.);
+      }
+      return os;
+      }
+
+      struct samples {
+      double found_probability;
+      std::vector<uint64_t> to_lookup_mixed;
+      size_t true_match;
+      size_t actual_sample_size;
+      };
+
+      typedef struct samples samples_t;
+      */
 #endif
