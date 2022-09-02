@@ -76,7 +76,6 @@ public:
     auto get_capacity() const -> size_t {
         return -1;
     }
-
     auto get_name() const -> std::string {
         return "Trivial-Filter ";
     }
@@ -684,13 +683,12 @@ public:
     return reduce32(out1, (uint32_t) number_of_pd);
   }
 
-  int * MultiAdd(u64 len, u64 * items) {
+  int * MultiExists(u64 len, u64 * items) {
     constexpr u64 full_mask = (1ULL << 55);
     uint32_t bin_index = 0;
     u64 i = 0;
     struct indexed_item_s * indexed_items = NULL;
     int * successes   = NULL;
-    u64 * new_to_original = NULL;
     u64 s = 0;
     u64 item = 0;
     uint32_t out1 = 0, out2 = 0;
@@ -698,7 +696,74 @@ public:
     bool err = false;
 
 
-    printf("len is %lu/%lu\n", len, number_of_pd);
+    indexed_items = (struct indexed_item_s *)malloc(sizeof(*indexed_items)*len);
+    memset(indexed_items, 0, sizeof(*indexed_items)*len);
+    if (indexed_items == NULL) {
+      err = true;
+      goto cleanup;
+    }
+
+    successes = (int *)malloc(sizeof(*successes)*len);
+    memset(successes, 0, sizeof(*successes)*len);
+    if (successes == NULL) {
+      err = true;
+      goto cleanup;
+    }
+
+    for (i = 0; i < len; i++) {
+      item = items[i];
+      s = H0(item);
+      out1 = s >> 32u;
+      out2 = s;
+      pd_index = reduce(out1, (uint32_t) number_of_pd);
+      indexed_items[i].index = i;
+      indexed_items[i].item  = items[i];
+      indexed_items[i].pdid  = pd_index;
+      indexed_items[i].hash  = out2;
+    }
+
+    std::sort(indexed_items,
+              indexed_items + len,
+              [this](struct indexed_item_s a, struct indexed_item_s b) {
+                return a.pdid < b.pdid;
+              });
+
+      printf("foobar: %lu %u\n", indexed_items[i].index, item_bin_index(indexed_items[i].item));
+    for (i = 0; i < len; i++) {
+      uint16_t qr = fixed_reduce(indexed_items[i].hash);
+      int64_t quot = qr >> 8;
+      uint8_t rem = qr;
+      uint32_t pdid = indexed_items[i].pdid;
+      successes[indexed_items[i].index] = ((!min_pd::cmp_qr1(qr, &pd_array[pdid])) ? min_pd::find_core(quot, rem, &pd_array[pdid]) : incSpare_lookup(pdid, qr));
+    }
+    
+  cleanup:
+    if (err) {
+      if (indexed_items) {
+        free(indexed_items);
+      }
+      if (successes) {
+        free(successes);
+        successes = NULL;
+      }
+    }
+
+    return successes;
+  }
+  
+  int * MultiAdd(u64 len, u64 * items) {
+    constexpr u64 full_mask = (1ULL << 55);
+    uint32_t bin_index = 0;
+    u64 i = 0;
+    struct indexed_item_s * indexed_items = NULL;
+    int * successes   = NULL;
+    u64 s = 0;
+    u64 item = 0;
+    uint32_t out1 = 0, out2 = 0;
+    uint32_t pd_index = 0;
+    bool err = false;
+
+
     indexed_items = (struct indexed_item_s *)malloc(sizeof(*indexed_items)*len);
     memset(indexed_items, 0, sizeof(*indexed_items)*len);
     if (indexed_items == NULL) {
@@ -864,106 +929,116 @@ public:
     auto get_cap() const -> size_t {
       return cap[0] + cap[1];
     }
+    auto get_max_capacity() const -> size_t {
+      return filter_max_capacity;
+    }
+
   };
 
 
-      template<typename filterTable>
-        struct FilterAPI<Prefix_Filter<filterTable>> {
-        using Table = Prefix_Filter<filterTable>;
+template<typename filterTable>
+struct FilterAPI<Prefix_Filter<filterTable>> {
+  using Table = Prefix_Filter<filterTable>;
 
-        static Table ConstructFromAddCount(size_t add_count) {
-          constexpr float loads[2] = {.95, .95};
-          // std::cout << "Lower workload" << std::endl;
-          // std::cout << "Workload 1!" << std::endl;
-          return Table(add_count, loads);
-        }
+  static Table ConstructFromAddCount(size_t add_count) {
+    constexpr float loads[2] = {.95, .95};
+    // std::cout << "Lower workload" << std::endl;
+    // std::cout << "Workload 1!" << std::endl;
+    return Table(add_count, loads);
+  }
 
-        static void Add(u64 key, Table *table) {
-          table->Add(key);
-        }
+  static void Add(u64 key, Table *table) {
+    table->Add(key);
+  }
   
-        static int * MultiAdd(u64 len, u64 * keys, Table *table) {
-          return table->MultiAdd(len, keys);
-        }
-        static void Remove(u64 key, Table *table) {
-          throw std::runtime_error("Unsupported");
-        }
+  static int * MultiAdd(u64 len, u64 * keys, Table *table) {
+    return table->MultiAdd(len, keys);
+  }
+  static int * MultiExists(u64 len, u64 * keys, Table *table) {
+    return table->MultiExists(len, keys);
+  }
+  static auto get_max_capacity(Table *table) {
+    return table->get_max_capacity();
+  }
+  static void Remove(u64 key, Table *table) {
+    throw std::runtime_error("Unsupported");
+  }
 
-        CONTAIN_ATTRIBUTES static bool Contain(u64 key, const Table *table) {
-          return table->Find(key);
-        }
+  CONTAIN_ATTRIBUTES static bool Contain(u64 key, const Table *table) {
+    return table->Find(key);
+  }
 
-        static std::string get_name(const Table *table) {
-          return table->get_name();
-        }
+  static std::string get_name(const Table *table) {
+    return table->get_name();
+  }
 
-        static auto get_functionality(const Table *table) -> uint32_t {
-          return 3;
-        }
+  static auto get_functionality(const Table *table) -> uint32_t {
+    return 3;
+  }
 
-        static auto get_ID(const Table *table) -> filter_id {
-          return prefix_id;
-        }
+  static auto get_ID(const Table *table) -> filter_id {
+    return prefix_id;
+  }
 
-        static size_t get_byte_size(const Table *table) {
-          return table->get_byte_size();
-        }
+  static size_t get_byte_size(const Table *table) {
+    return table->get_byte_size();
+  }
 
-        static size_t get_cap(const Table *table) {
-          return table->get_cap();
-        }
-      };
+  static size_t get_cap(const Table *table) {
+    return table->get_cap();
+  }
+};
 
 
-      template<typename ItemType,
-               size_t bits_per_item,
-               bool branchless,
-               typename HashFamily>
-        struct FilterAPI<bloomfilter::BloomFilter<ItemType, bits_per_item, branchless, HashFamily>> {
-        using Table = bloomfilter::BloomFilter<ItemType, bits_per_item, branchless, HashFamily>;
+template<typename ItemType,
+         size_t bits_per_item,
+         bool branchless,
+         typename HashFamily>
+struct FilterAPI<bloomfilter::BloomFilter<ItemType, bits_per_item, branchless, HashFamily>> {
+  using Table = bloomfilter::BloomFilter<ItemType, bits_per_item, branchless, HashFamily>;
 
-        static Table ConstructFromAddCount(size_t add_count) {
-          return Table(add_count);
-        }
+  static Table ConstructFromAddCount(size_t add_count) {
+    return Table(add_count);
+  }
 
-        static void Add(uint64_t key, Table *table) {
-          table->Add(key);
-        }
+  static void Add(uint64_t key, Table *table) {
+    table->Add(key);
+  }
 
-        static void Remove(uint64_t key, Table *table) {
-          throw std::runtime_error("Unsupported");
-        }
+  static void Remove(uint64_t key, Table *table) {
+    throw std::runtime_error("Unsupported");
+  }
 
-        inline static bool Contain(uint64_t key, const Table *table) {
-          return table->Contain(key) == bloomfilter::Ok;
-        }
+  inline static bool Contain(uint64_t key, const Table *table) {
+    return table->Contain(key) == bloomfilter::Ok;
+  }
 
-        static std::string get_name(const Table *table) {
-          return table->get_name();
-        }
+  static std::string get_name(const Table *table) {
+    return table->get_name();
+  }
 
-        static auto get_info(const Table *table) -> std::stringstream {
-          assert(0);
-          std::stringstream ss;
-          return ss;
-        }
+  static auto get_info(const Table *table) -> std::stringstream {
+    assert(0);
+    std::stringstream ss;
+    return ss;
+  }
 
-        static auto get_functionality(const Table *table) -> uint32_t {
-          return 3;
-        }
-        static auto get_ID(const Table *table) -> filter_id {
-          return bloom_id;
-        }
+  static auto get_functionality(const Table *table) -> uint32_t {
+    return 3;
+  }
+  static auto get_ID(const Table *table) -> filter_id {
+    return bloom_id;
+  }
 
-        static size_t get_byte_size(const Table *table) {
-          return table->SizeInBytes();
-        }
+  static size_t get_byte_size(const Table *table) {
+    return table->SizeInBytes();
+  }
 
-        static size_t get_cap(const Table *table) {
-          return -1;
-          // return table->get_cap();
-        }
-      };
+  static size_t get_cap(const Table *table) {
+    return -1;
+    // return table->get_cap();
+  }
+};
 
       /*
       // The statistics gathered for each table type:
