@@ -669,11 +669,11 @@ public:
     }
 
     inline void incSpare_add(size_t pd_index, const min_pd::add_res &a_info) {
-        cap[1]++;
-        u16 qr = (((u16) a_info.quot) << 8u) | a_info.rem;
-        const u64 data = (pd_index << 13u) | qr;
-        //        u64 hashed_res = Hasher(data);
-        return FilterAPI<Table>::Add(data, &GenSpare);
+      cap[1]++;
+      u16 qr = (((u16) a_info.quot) << 8u) | a_info.rem;
+      const u64 data = (pd_index << 13u) | qr;
+      //        u64 hashed_res = Hasher(data);
+      return FilterAPI<Table>::Add(data, &GenSpare);
     }
 
   uint32_t item_bin_index(u64 &item) {
@@ -728,7 +728,6 @@ public:
                 return a.pdid < b.pdid;
               });
 
-      printf("foobar: %lu %u\n", indexed_items[i].index, item_bin_index(indexed_items[i].item));
     for (i = 0; i < len; i++) {
       uint16_t qr = fixed_reduce(indexed_items[i].hash);
       int64_t quot = qr >> 8;
@@ -756,12 +755,12 @@ public:
     uint32_t bin_index = 0;
     u64 i = 0;
     struct indexed_item_s * indexed_items = NULL;
-    int * successes   = NULL;
+    int * successes                       = NULL;
     u64 s = 0;
     u64 item = 0;
     uint32_t out1 = 0, out2 = 0;
     uint32_t pd_index = 0;
-    bool err = false;
+    bool err        = false;
 
 
     indexed_items = (struct indexed_item_s *)malloc(sizeof(*indexed_items)*len);
@@ -797,7 +796,6 @@ public:
               });
 
     for (i = 0; i < len; i++) {
-      printf("%lu %u\n", indexed_items[i].index, item_bin_index(indexed_items[i].item));
       uint16_t qr = fixed_reduce(indexed_items[i].hash);
       int64_t quot = qr >> 8;
       uint8_t rem = qr;
